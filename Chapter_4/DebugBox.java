@@ -1,38 +1,29 @@
-public class DebugBox
-{
-private int width;
-private int length;
-private int height;
-public DebugBox()
-{
-length = 1;
-width = 1;
-height = 1;
-}
-public DebugBox(int width, int length, int height)
-{
-this.width = width;
-this.length = length;
-this.height = height;
-}
-public void showData()
-{
-System.out.println("Width: " + width + "\n" + "Length: " +
-length + "\n" + "Height: " + height);
-}
-public double getVolume()
-{
-double vol = length * width * height;
-System.out.println("Volume: " + vol);
-return vol;
-}
+public class DebugBox {
+    private int width;
+    private int length;
+    private int height;
 
-  public static void main(String[] a) {
-        DebugBox box = new DebugBox(4, 8, 4);
-        
-        box.showData();
-        box.getVolume();
+    // Default constructor
+    public DebugBox() {
+        width = 1;
+        length = 1;
+        height = 1;
+    }
 
+    // Constructor with parameters
+    public DebugBox(int w, int l, int h) {
+        width = w;
+        length = l;
+        height = h;
+    }
 
-}
+    // Method to show box data
+    public void showData() {
+        System.out.println("Width: " + width + " Length: " + length + " Height: " + height);
+    }
+
+    // Method to calculate volume
+    public double getVolume() {
+        return (double) width * length * height;
+    }
 }
