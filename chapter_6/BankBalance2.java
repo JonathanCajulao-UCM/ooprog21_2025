@@ -5,7 +5,7 @@ public class BankBalance2 {
         Scanner input = new Scanner(System.in);
         double balance = 103.8; // starting balance
         final double INTEREST_RATE = 0.03;
-        int year = 1;
+        int year = 2;
         int choice;
 
         do {
