@@ -1,0 +1,588 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+
+namespace QRConsole
+{
+    // ── Models ──────────────────────────────────────────────────────────────
+
+    public enum RecordStatus { Active, Archived, Pending }
+
+    public enum AuditAction { Add, Update, View, Delete, Report }
+
+    public class FileRecord
+    {
+        public string Id { get; set; }
+        public string FileName { get; set; }
+        public string Category { get; set; }
+        public RecordStatus Status { get; set; }
+        public string FileSize { get; set; }
+        public string Description { get; set; }
+        public DateTime Uploaded { get; set; }
+        public string Checksum { get; set; }
+    }
+
+    // ── Validator ────────────────────────────────────────────────────────────
+
+    public static class Validator
+    {
+        public static bool ValidateRecord(string fileName, string category, out string error)
+        {
+            error = string.Empty;
+            if (string.IsNullOrWhiteSpace(fileName))
+            {
+                error = "Filename is required.";
+                return false;
+            }
+            if (string.IsNullOrWhiteSpace(category))
+            {
+                error = "Category is required.";
+                return false;
+            }
+            return true;
+        }
+    }
+
+    // ── File Repository ───────────────────────────────────────────────────────
+
+    public class FileRepository
+    {
+        private readonly List<FileRecord> _records = new();
+        private int _counter = 1;
+
+        public string GenerateId() => $"REC-{_counter:D4}";
+
+        public static string ComputeChecksum(string input)
+        {
+            byte[] bytes = SHA256.HashData(Encoding.UTF8.GetBytes(input));
+            return BitConverter.ToString(bytes).Replace("-", "")[..16];
+        }
+
+        public FileRecord Add(string fileName, string category,
+                              RecordStatus status, string fileSize, string description)
+        {
+            var record = new FileRecord
+            {
+                Id = GenerateId(),
+                FileName = fileName,
+                Category = category,
+                Status = status,
+                FileSize = fileSize,
+                Description = description,
+                Uploaded = DateTime.Now,
+                Checksum = ComputeChecksum(fileName)
+            };
+            _records.Add(record);
+            _counter++;
+            return record;
+        }
+
+        public FileRecord? GetById(string id) =>
+            _records.FirstOrDefault(r => r.Id == id);
+
+        public List<FileRecord> GetAll() => _records.ToList();
+
+        public List<FileRecord> Search(string query, string? statusFilter = null)
+        {
+            var q = query.ToLower();
+            return _records.Where(r =>
+            {
+                bool matchQuery = string.IsNullOrEmpty(query) ||
+                                  r.Id.ToLower().Contains(q) ||
+                                  r.FileName.ToLower().Contains(q) ||
+                                  r.Category.ToLower().Contains(q);
+
+                bool matchStatus = statusFilter == null ||
+                                   r.Status.ToString() == statusFilter;
+
+                return matchQuery && matchStatus;
+            }).ToList();
+        }
+
+        public bool Update(string id, string fileName, string category,
+                           RecordStatus status, string fileSize, string description)
+        {
+            var rec = GetById(id);
+            if (rec == null) return false;
+
+            rec.FileName = fileName;
+            rec.Category = category;
+            rec.Status = status;
+            rec.FileSize = fileSize;
+            rec.Description = description;
+            rec.Checksum = ComputeChecksum(fileName);
+            return true;
+        }
+
+        public bool SoftDelete(string id)
+        {
+            var rec = GetById(id);
+            if (rec == null) return false;
+            rec.Status = RecordStatus.Archived;
+            return true;
+        }
+
+        public bool HardDelete(string id)
+        {
+            var rec = GetById(id);
+            if (rec == null) return false;
+            _records.Remove(rec);
+            return true;
+        }
+
+        public bool VerifyChecksum(string id, out string stored, out string computed)
+        {
+            var rec = GetById(id);
+            if (rec == null) { stored = computed = string.Empty; return false; }
+            stored = rec.Checksum;
+            computed = ComputeChecksum(rec.FileName);
+            return stored == computed;
+        }
+    }
+
+    // ── Audit Logger ──────────────────────────────────────────────────────────
+
+    public class AuditLogger
+    {
+        private readonly List<AuditEntry> _log = new();
+
+        public void Log(AuditAction action, string user,
+                        string recordId, string detail)
+        {
+            _log.Add(new AuditEntry
+            {
+                Timestamp = DateTime.Now,
+                Action = action,
+                User = user,
+                RecordId = recordId,
+                Detail = detail
+            });
+        }
+
+        public List<AuditEntry> GetAll() => _log.ToList();
+        public void Clear() => _log.Clear();
+    }
+
+    public class AuditEntry
+    {
+        public DateTime Timestamp { get; set; }
+        public AuditAction Action { get; set; }
+        public string User { get; set; }
+        public string RecordId { get; set; }
+        public string Detail { get; set; }
+    }
+
+    // ── Report Generator ──────────────────────────────────────────────────────
+
+    public static class ReportGenerator
+    {
+        public static void Generate(FileRepository repo, AuditLogger logger,
+                                    string user)
+        {
+            var records = repo.GetAll();
+
+            Console.WriteLine("\n══════════════════════════════════════════");
+            Console.WriteLine("          QR CONSOLE — FILE REPORT");
+            Console.WriteLine($"  Generated : {DateTime.Now:yyyy-MM-dd HH:mm}");
+            Console.WriteLine("══════════════════════════════════════════");
+
+            Console.WriteLine($"\n  Total Records : {records.Count}");
+            Console.WriteLine($"  Active        : {records.Count(r => r.Status == RecordStatus.Active)}");
+            Console.WriteLine($"  Pending       : {records.Count(r => r.Status == RecordStatus.Pending)}");
+            Console.WriteLine($"  Archived      : {records.Count(r => r.Status == RecordStatus.Archived)}");
+
+            Console.WriteLine("\n  ── By Category ──────────────────────");
+            foreach (var grp in records.GroupBy(r => r.Category).OrderBy(g => g.Key))
+                Console.WriteLine($"  {grp.Key,-35} {grp.Count(),3} record(s)");
+
+            Console.WriteLine("\n  ── Recent Audit (last 5) ────────────");
+            foreach (var e in logger.GetAll().TakeLast(5).Reverse())
+                Console.WriteLine($"  [{e.Timestamp:HH:mm}] {e.Action,-8} {e.RecordId,-10} {e.Detail}");
+
+            Console.WriteLine("══════════════════════════════════════════\n");
+
+            logger.Log(AuditAction.Report, user, "-", "Report generated");
+        }
+    }
+
+    // ── Error Handler ─────────────────────────────────────────────────────────
+
+    public class ErrorHandler
+    {
+        private readonly List<(DateTime Time, string Type, string Detail)> _errors = new();
+
+        public void Log(string type, string detail)
+        {
+            _errors.Add((DateTime.Now, type, detail));
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"  [ERROR] [{type}] {detail}");
+            Console.ResetColor();
+        }
+
+        public void ShowAll()
+        {
+            if (_errors.Count == 0) { Console.WriteLine("  No errors logged."); return; }
+            foreach (var (t, type, detail) in _errors)
+                Console.WriteLine($"  {t:HH:mm}  [{type}]  {detail}");
+        }
+
+        public void Clear() => _errors.Clear();
+    }
+
+    // ── Menu / Controller ─────────────────────────────────────────────────────
+
+    class Program
+    {
+        static readonly FileRepository Repo = new();
+        static readonly AuditLogger Auditor = new();
+        static readonly ErrorHandler Errors = new();
+        static readonly string User = "Alex Johnson";
+
+        static readonly string[] Categories =
+        {
+            "Library Loans",
+            "Clinic Appointments",
+            "Inventory Batches",
+            "Student Consultation Logs",
+            "Guest Registrations",
+            "Vehicle Service Records"
+        };
+
+        static void Main()
+        {
+            SeedData();
+            bool running = true;
+
+            while (running)
+            {
+                ShowMainMenu();
+                string choice = Console.ReadLine()?.Trim() ?? "";
+
+                switch (choice)
+                {
+                    case "1": AddRecord(); break;
+                    case "2": ViewRecords(); break;
+                    case "3": UpdateRecord(); break;
+                    case "4": DeleteMenu(); break;
+                    case "5": ShowAuditLog(); break;
+                    case "6": ReportGenerator.Generate(Repo, Auditor, User); break;
+                    case "7": ShowErrors(); break;
+                    case "0": running = false; break;
+                    default:
+                        Errors.Log("Input", $"Unknown menu option: {choice}");
+                        break;
+                }
+            }
+
+            Console.WriteLine("\n  Goodbye.\n");
+        }
+
+        // ── Menu ──────────────────────────────────────────────────────────────
+
+        static void ShowMainMenu()
+        {
+            Console.Clear();
+            Console.WriteLine("╔═══════════════════════════════╗");
+            Console.WriteLine("║      QR CONSOLE  v1.0         ║");
+            Console.WriteLine("║  File Records Manager         ║");
+            Console.WriteLine("╠═══════════════════════════════╣");
+            Console.WriteLine("║  1. Add Record                ║");
+            Console.WriteLine("║  2. View / Search Records     ║");
+            Console.WriteLine("║  3. Update Record             ║");
+            Console.WriteLine("║  4. Delete Record             ║");
+            Console.WriteLine("║  5. Audit Log                 ║");
+            Console.WriteLine("║  6. Generate Report           ║");
+            Console.WriteLine("║  7. Error Log                 ║");
+            Console.WriteLine("║  0. Exit                      ║");
+            Console.WriteLine("╚═══════════════════════════════╝");
+            Console.Write("\n  Choice: ");
+        }
+
+        // ── Add ───────────────────────────────────────────────────────────────
+
+        static void AddRecord()
+        {
+            Console.Clear();
+            Console.WriteLine("  ── Add New Record ──\n");
+
+            Console.Write("  Filename   : ");
+            string name = Console.ReadLine() ?? "";
+
+            Console.WriteLine("\n  Categories:");
+            for (int i = 0; i < Categories.Length; i++)
+                Console.WriteLine($"    {i + 1}. {Categories[i]}");
+            Console.Write("  Select (1-6): ");
+            string catInput = Console.ReadLine() ?? "";
+
+            string category = int.TryParse(catInput, out int ci) && ci >= 1 && ci <= 6
+                ? Categories[ci - 1] : "";
+
+            if (!Validator.ValidateRecord(name, category, out string error))
+            {
+                Errors.Log("Validation", error);
+                Pause();
+                return;
+            }
+
+            Console.Write("  Status (1=Active, 2=Pending, 3=Archived) [1]: ");
+            string stInput = Console.ReadLine() ?? "1";
+            RecordStatus status = stInput switch
+            {
+                "2" => RecordStatus.Pending,
+                "3" => RecordStatus.Archived,
+                _ => RecordStatus.Active
+            };
+
+            Console.Write("  File Size  : ");
+            string size = Console.ReadLine() ?? "—";
+
+            Console.Write("  Description: ");
+            string desc = Console.ReadLine() ?? "";
+
+            var rec = Repo.Add(name, category, status, size, desc);
+            Auditor.Log(AuditAction.Add, User, rec.Id, "Record created");
+
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"\n  Record {rec.Id} saved. Checksum: {rec.Checksum}");
+            Console.ResetColor();
+            Pause();
+        }
+
+        // ── View / Search ─────────────────────────────────────────────────────
+
+        static void ViewRecords()
+        {
+            Console.Clear();
+            Console.WriteLine("  ── View Records ──\n");
+            Console.Write("  Search (leave blank for all): ");
+            string q = Console.ReadLine() ?? "";
+            Console.Write("  Filter status (Active/Pending/Archived, blank=all): ");
+            string sf = Console.ReadLine()?.Trim() ?? "";
+            if (string.IsNullOrWhiteSpace(sf)) sf = null;
+
+            var list = Repo.Search(q, sf);
+            if (list.Count == 0) { Console.WriteLine("  No records found."); Pause(); return; }
+
+            Console.WriteLine($"\n  {"ID",-10} {"Filename",-28} {"Category",-28} {"Status",-10} {"Uploaded",-12} Checksum");
+            Console.WriteLine(new string('─', 108));
+
+            foreach (var r in list)
+            {
+                Console.Write($"  {r.Id,-10} {Truncate(r.FileName, 26),-28} {Truncate(r.Category, 26),-28} ");
+                Console.ForegroundColor = r.Status switch
+                {
+                    RecordStatus.Active => ConsoleColor.Green,
+                    RecordStatus.Pending => ConsoleColor.Yellow,
+                    RecordStatus.Archived => ConsoleColor.DarkGray,
+                    _ => ConsoleColor.White
+                };
+                Console.Write($"{r.Status,-10}");
+                Console.ResetColor();
+                Console.WriteLine($" {r.Uploaded:yyyy-MM-dd}   {r.Checksum}");
+            }
+
+            Console.Write("\n  Enter Record ID to view details (or Enter to go back): ");
+            string id = Console.ReadLine()?.Trim() ?? "";
+            if (!string.IsNullOrEmpty(id))
+            {
+                var rec = Repo.GetById(id.ToUpper());
+                if (rec == null)
+                {
+                    Console.WriteLine("  Record not found.");
+                }
+                else
+                {
+                    Auditor.Log(AuditAction.View, User, rec.Id, "Record viewed");
+                    Console.WriteLine($"\n  ID          : {rec.Id}");
+                    Console.WriteLine($"  Filename    : {rec.FileName}");
+                    Console.WriteLine($"  Category    : {rec.Category}");
+                    Console.WriteLine($"  Status      : {rec.Status}");
+                    Console.WriteLine($"  File Size   : {rec.FileSize}");
+                    Console.WriteLine($"  Description : {rec.Description}");
+                    Console.WriteLine($"  Uploaded    : {rec.Uploaded:yyyy-MM-dd HH:mm}");
+                    Console.WriteLine($"  Checksum    : {rec.Checksum}");
+                }
+            }
+            Pause();
+        }
+
+        // ── Update ────────────────────────────────────────────────────────────
+
+        static void UpdateRecord()
+        {
+            Console.Clear();
+            Console.WriteLine("  ── Update Record ──\n");
+            Console.Write("  Record ID: ");
+            string id = Console.ReadLine()?.Trim().ToUpper() ?? "";
+
+            var rec = Repo.GetById(id);
+            if (rec == null)
+            {
+                Errors.Log("Missing File", $"Record {id} not found for update");
+                Pause(); return;
+            }
+
+            Console.WriteLine($"\n  Editing {rec.Id} — {rec.FileName}");
+            Console.Write($"  Filename   [{rec.FileName}]: ");
+            string name = Console.ReadLine() ?? "";
+            if (string.IsNullOrWhiteSpace(name)) name = rec.FileName;
+
+            Console.Write($"  Category   [{rec.Category}]: ");
+            string cat = Console.ReadLine() ?? "";
+            if (string.IsNullOrWhiteSpace(cat)) cat = rec.Category;
+
+            Console.Write($"  Status     [{rec.Status}] (1=Active, 2=Pending, 3=Archived): ");
+            string stIn = Console.ReadLine() ?? "";
+            RecordStatus status = stIn switch
+            {
+                "1" => RecordStatus.Active,
+                "2" => RecordStatus.Pending,
+                "3" => RecordStatus.Archived,
+                _ => rec.Status
+            };
+
+            Console.Write($"  File Size  [{rec.FileSize}]: ");
+            string size = Console.ReadLine() ?? "";
+            if (string.IsNullOrWhiteSpace(size)) size = rec.FileSize;
+
+            Console.Write($"  Description[{rec.Description}]: ");
+            string desc = Console.ReadLine() ?? "";
+            if (string.IsNullOrWhiteSpace(desc)) desc = rec.Description;
+
+            if (!Validator.ValidateRecord(name, cat, out string error))
+            {
+                Errors.Log("Validation", error);
+                Pause(); return;
+            }
+
+            Repo.Update(id, name, cat, status, size, desc);
+            Auditor.Log(AuditAction.Update, User, id, "Record updated");
+
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"\n  Record {id} updated. New checksum: {rec.Checksum}");
+            Console.ResetColor();
+            Pause();
+        }
+
+        // ── Delete ────────────────────────────────────────────────────────────
+
+        static void DeleteMenu()
+        {
+            Console.Clear();
+            Console.WriteLine("  ── Delete Record ──\n");
+            Console.Write("  Record ID: ");
+            string id = Console.ReadLine()?.Trim().ToUpper() ?? "";
+
+            var rec = Repo.GetById(id);
+            if (rec == null)
+            {
+                Errors.Log("Missing File", $"Record {id} not found for delete");
+                Pause(); return;
+            }
+
+            Console.WriteLine($"\n  Record: {rec.Id} — {rec.FileName} ({rec.Category})");
+            Console.WriteLine("  1. Soft delete (Archive)");
+            Console.WriteLine("  2. Hard delete (Permanent)");
+            Console.WriteLine("  0. Cancel");
+            Console.Write("\n  Choice: ");
+
+            switch (Console.ReadLine()?.Trim())
+            {
+                case "1":
+                    Repo.SoftDelete(id);
+                    Auditor.Log(AuditAction.Delete, User, id, "Soft deleted — status set to Archived");
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"\n  Record {id} archived.");
+                    Console.ResetColor();
+                    break;
+                case "2":
+                    Console.Write("  Confirm hard delete? (yes/no): ");
+                    if (Console.ReadLine()?.Trim().ToLower() == "yes")
+                    {
+                        Repo.HardDelete(id);
+                        Auditor.Log(AuditAction.Delete, User, id, "Hard deleted — permanently removed");
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"\n  Record {id} permanently deleted.");
+                        Console.ResetColor();
+                    }
+                    break;
+                default:
+                    Console.WriteLine("  Cancelled.");
+                    break;
+            }
+            Pause();
+        }
+
+        // ── Audit Log ─────────────────────────────────────────────────────────
+
+        static void ShowAuditLog()
+        {
+            Console.Clear();
+            Console.WriteLine("  ── Audit Log ──\n");
+            var log = Auditor.GetAll();
+            if (log.Count == 0) { Console.WriteLine("  No entries."); Pause(); return; }
+
+            foreach (var e in log.AsEnumerable().Reverse())
+            {
+                Console.Write($"  {e.Timestamp:yyyy-MM-dd HH:mm}  ");
+                Console.ForegroundColor = e.Action switch
+                {
+                    AuditAction.Add => ConsoleColor.Green,
+                    AuditAction.Update => ConsoleColor.Cyan,
+                    AuditAction.Delete => ConsoleColor.Red,
+                    AuditAction.Report => ConsoleColor.Magenta,
+                    _ => ConsoleColor.Yellow
+                };
+                Console.Write($"{e.Action,-8}");
+                Console.ResetColor();
+                Console.WriteLine($"  {e.RecordId,-10}  {e.Detail}  — {e.User}");
+            }
+
+            Console.Write("\n  Clear log? (yes/no): ");
+            if (Console.ReadLine()?.Trim().ToLower() == "yes")
+            {
+                Auditor.Clear();
+                Console.WriteLine("  Log cleared.");
+            }
+            Pause();
+        }
+
+        // ── Errors ────────────────────────────────────────────────────────────
+
+        static void ShowErrors()
+        {
+            Console.Clear();
+            Console.WriteLine("  ── Error Log ──\n");
+            Errors.ShowAll();
+            Console.Write("\n  Clear errors? (yes/no): ");
+            if (Console.ReadLine()?.Trim().ToLower() == "yes") Errors.Clear();
+            Pause();
+        }
+
+        // ── Helpers ───────────────────────────────────────────────────────────
+
+        static void SeedData()
+        {
+            Repo.Add("library_loans_march.xlsx", "Library Loans", RecordStatus.Active, "1.2 MB", "March 2026 loan log");
+            Repo.Add("clinic_appt_q1.pdf", "Clinic Appointments", RecordStatus.Active, "3.4 MB", "Q1 clinic schedule");
+            Repo.Add("inventory_batch_12.csv", "Inventory Batches", RecordStatus.Pending, "820 KB", "Batch 12 intake");
+            Repo.Add("consult_log_2025.docx", "Student Consultation Logs", RecordStatus.Archived, "560 KB", "Full year 2025");
+            Repo.Add("guest_reg_may.pdf", "Guest Registrations", RecordStatus.Active, "200 KB", "May events");
+            Repo.Add("vehicle_svc_apr.csv", "Vehicle Service Records", RecordStatus.Pending, "140 KB", "April service batch");
+            foreach (var r in Repo.GetAll())
+                Auditor.Log(AuditAction.Add, "System", r.Id, "Seeded on startup");
+        }
+
+        static void Pause()
+        {
+            Console.Write("\n  Press any key to continue...");
+            Console.ReadKey();
+        }
+
+        static string Truncate(string s, int max) =>
+            s.Length <= max ? s : s[..(max - 1)] + "…";
+    }
+}
